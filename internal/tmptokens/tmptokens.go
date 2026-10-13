@@ -89,6 +89,26 @@ func Check(id string) (any, error) {
 	return token.Data, nil
 }
 
+// Exists checks whether a non-expired token exists for the given ID without
+// consuming it or incrementing its check counter.
+func Exists(id string) bool {
+	mu.Lock()
+	defer mu.Unlock()
+
+	token, exists := tokens[id]
+	if !exists {
+		return false
+	}
+
+	// Check if token has expired.
+	if time.Since(token.CreatedAt) > token.TTL {
+		delete(tokens, id)
+		return false
+	}
+
+	return true
+}
+
 // Get retrieves a token by ID and automatically deletes it (after one time use).
 // An error is returned if the token doesn't exist or has expired.
 func Get(id string) (any, error) {

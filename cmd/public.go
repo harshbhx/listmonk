@@ -18,6 +18,7 @@ import (
 	"github.com/knadh/listmonk/internal/i18n"
 	"github.com/knadh/listmonk/internal/manager"
 	"github.com/knadh/listmonk/internal/notifs"
+	"github.com/knadh/listmonk/internal/tmptokens"
 	"github.com/knadh/listmonk/models"
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
@@ -25,6 +26,10 @@ import (
 
 const (
 	tplMessage = "message"
+
+	// optinCooldown is the minimum interval between opt-in confirmation e-mails
+	// triggered for the same e-mail address via the public subscription form/API.
+	optinCooldown = 10 * time.Minute
 )
 
 // pubTplRenderer wraps public templates for echo.
@@ -864,6 +869,9 @@ func (a *App) processSubForm(c echo.Context) (bool, error) {
 		Status: models.SubscriberStatusEnabled,
 	}, nil, listUUIDs, false, true)
 	if err == nil {
+		if hasOptin {
+			tmptokens.Set(optinCooldownKey(req.Email), optinCooldown, nil)
+		}
 		return hasOptin, nil
 	}
 
@@ -872,6 +880,13 @@ func (a *App) processSubForm(c echo.Context) (bool, error) {
 
 	// Subscriber already exists. Update subscriptions in the DB.
 	if e, ok := err.(*echo.HTTPError); ok && e.Code == http.StatusConflict {
+		// An opt-in confirmation was recently sent to this e-mail. Don't process
+		// the request again so that the public form can't be (ab)used to flood
+		// an inbox with repeated confirmation e-mails.
+		if tmptokens.Exists(optinCooldownKey(req.Email)) {
+			return true, nil
+		}
+
 		// Get the subscriber from the DB by their email.
 		sub, err := a.core.GetSubscriber(0, "", req.Email)
 		if err != nil {
@@ -881,6 +896,9 @@ func (a *App) processSubForm(c echo.Context) (bool, error) {
 		// Update the subscriber's subscriptions in the DB.
 		_, hasOptin, err := a.core.UpdateSubscriberWithLists(sub.ID, sub, nil, listUUIDs, false, false, true, nil, true)
 		if err == nil {
+			if hasOptin {
+				tmptokens.Set(optinCooldownKey(req.Email), optinCooldown, nil)
+			}
 			return hasOptin, nil
 		}
 		lastErr = err
@@ -891,4 +909,10 @@ func (a *App) processSubForm(c echo.Context) (bool, error) {
 		return false, echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("%s", e.Message))
 	}
 	return false, echo.NewHTTPError(http.StatusInternalServerError, a.i18n.T("public.errorProcessingRequest"))
+}
+
+// optinCooldownKey returns the tmptokens key used to throttle opt-in
+// confirmation e-mails for an e-mail address.
+func optinCooldownKey(email string) string {
+	return "optin:" + strings.ToLower(email)
 }
